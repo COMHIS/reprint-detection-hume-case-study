@@ -1,0 +1,4 @@
+{"pair_id":"src001::news001","pred_label":"reprint","annotation_label":"reprint","mentions_hume":true,"audit_subset":"predicted_positive","annotation_reason":"substantial_reuse"}
+{"pair_id":"src002::news002","pred_label":"reprint","annotation_label":"reprint","mentions_hume":false,"audit_subset":"predicted_positive","annotation_reason":"unattributed_extract"}
+{"pair_id":"src003::news003","pred_label":"non_reprint","annotation_label":"non_reprint","mentions_hume":null,"audit_subset":"near_boundary_negative","annotation_reason":"quotation"}
+{"pair_id":"src004::news004","pred_label":"non_reprint","annotation_label":"reprint","mentions_hume":false,"audit_subset":"disagreement_negative","annotation_reason":"fragmented_reuse"}
