@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+data/raw/*
+data/processed/*
+data/annotation/*
+data/evaluation/*
+!data/**/.gitkeep
+!data/README.md
+outputs/
