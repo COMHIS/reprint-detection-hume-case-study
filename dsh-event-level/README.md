@@ -99,3 +99,7 @@ cannot appear in a final-review record.
 Passage reconstruction is the one stage where a supervised model materially
 outperforms a rule, which is why `passage_links.legacy_gap_rule` is kept — so
 the comparison can be reproduced, not because the rule is recommended.
+
+## License
+
+MIT; see the repository `LICENSE`. Copyright (c) 2026 Ke Shu and Mikko Tolonen.
