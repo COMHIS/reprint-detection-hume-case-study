@@ -102,4 +102,4 @@ the comparison can be reproduced, not because the rule is recommended.
 
 ## License
 
-MIT; see the repository `LICENSE`. Copyright (c) 2026 Ke Shu and Mikko Tolonen.
+MIT; see the repository `LICENSE`. Copyright (c) 2026 Ke Shu, Kira Hinderks and Mikko Tolonen.
