@@ -52,4 +52,4 @@ The event-level citation is added when the DSH article is published.
 
 MIT for both directories; see `LICENSE`. Copyright is held separately for
 each: `cikm-pair-level/` by Ke Shu, Kira Hinderks, Eetu Mäkelä and Mikko
-Tolonen, and `dsh-event-level/` by Ke Shu and Mikko Tolonen.
+Tolonen, and `dsh-event-level/` by Ke Shu, Kira Hinderks and Mikko Tolonen.
