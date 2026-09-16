@@ -1,7 +1,8 @@
 # Event-Level Evidence Construction from Text Reuse
 
 Code for the DSH article *From matches to events: the iterative construction of
-text-reuse evidence*. It covers the layer above pair-level consolidation: how
+text-reuse evidence, with Hume's essays in eighteenth-century books and
+newspapers*. It covers the layer above pair-level consolidation: how
 fragments with offsets become local passages, how passages become event
 candidates a scholar can review, how three kinds of human label are kept apart,
 and the five tests the resulting layer has to pass.
