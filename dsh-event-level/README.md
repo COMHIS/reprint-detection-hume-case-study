@@ -36,6 +36,7 @@ dsh-event-level/
       coverage_audit.py     pooled probability audits and the recall bound
       cross_media.py        shared identity-free core and the transfer matrix
   scripts/                  command-line entry points, one per stage
+                            (incl. reproduce_paper_numbers.py, the article's numbers)
   examples/                 one small file per schema
   data/                     empty skeleton; see data/README.md
 ```
@@ -87,6 +88,19 @@ python scripts/run_evidence_tests.py \
   --frame-destinations 2190 \
   --out-report data/processed/evidence_tests.json
 ```
+
+## Reproducing the article's numbers
+
+`scripts/reproduce_paper_numbers.py` recomputes every quantity reported in the
+article from the published data release, which carries no OCR text or page
+images. It prints each value next to the one printed in the article and writes a
+JSON report.
+
+```bash
+python scripts/reproduce_paper_numbers.py --release /path/to/data/release
+```
+
+Supplementary Appendix E of the article states the procedure behind each block.
 
 ## What the models are for
 
