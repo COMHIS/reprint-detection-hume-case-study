@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import json
 import math
 import random
@@ -22,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 from scipy.stats import spearmanr
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,11 +43,17 @@ def table(rel: str) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
+def close(a, b, tolerance: float) -> bool:
+    """Compare numbers, or nested tuples and lists of them, within tolerance."""
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) <= tolerance
+    if isinstance(a, (tuple, list)) and isinstance(b, (tuple, list)) and len(a) == len(b):
+        return all(close(x, y, tolerance) for x, y in zip(a, b))
+    return a == b
+
+
 def report(test: str, quantity: str, released, article, tolerance: float = 0.0) -> None:
-    if isinstance(article, (int, float)) and isinstance(released, (int, float)):
-        ok = abs(released - article) <= tolerance
-    else:
-        ok = released == article
+    ok = close(released, article, tolerance)
     results.append({"test": test, "quantity": quantity, "released": released,
                     "article": article, "match": ok})
     mark = "ok " if ok else "DIFF"
@@ -193,28 +202,68 @@ def shares(flags: np.ndarray) -> np.ndarray:
     return np.array([flags[decade_index == i].mean() for i in range(len(decades))])
 
 
+def issue_of(dst: str) -> tuple:
+    m = re.match(r"([A-Z0-9]+)_([A-Z0-9]+)_(\d{4})_(\d{2})_(\d{2})", dst)
+    return (m.group(2), m.group(3), m.group(4), m.group(5)) if m else (dst,)
+
+
 obs_share = shares(political)
 obs_rho = spearmanr(range(len(decades)), obs_share).statistic
-rng = np.random.default_rng(20260804)
-last_null, rho_null = [], []
-for _ in range(composition_iterations):
-    perm = rng.permutation(political)
-    s = shares(perm)
-    last_null.append(s[-1])
-    rho_null.append(spearmanr(range(len(decades)), s).statistic)
-last_null, rho_null = np.array(last_null), np.array(rho_null)
-exceed = int((last_null >= obs_share[-1] - 1e-12).sum())
 report("composition null", "1790s political share", round(float(obs_share[-1]), 3), 0.773)
-report("composition null", "null mean of 1790s share", round(float(last_null.mean()), 3), 0.421, 0.005)
-results.append({"test": "composition null",
-                "quantity": f"permutations at or above the observed 1790s share (of {composition_iterations:,})",
-                "released": exceed, "article": "< 0.0002 as a share of permutations",
-                "match": exceed / composition_iterations < 0.0002})
-print(f"  [{'ok ' if results[-1]['match'] else 'DIFF'}] permutations at or above observed: "
-      f"released {exceed} of {composition_iterations:,} (p = {exceed / composition_iterations:.5f}) "
-      f"| article p < 0.0002")
 report("composition null", "Spearman decade vs share", round(float(obs_rho), 3), 0.600)
-report("composition null", "trend p", round(float((rho_null >= obs_rho - 1e-12).mean()), 2), 0.18, 0.02)
+
+# The article's null groups relations by issue and permutes decade labels across
+# issues, so that two relations printed in one issue move together.
+groups: dict = defaultdict(list)
+for r in news_rel:
+    e = {x["event_candidate_id"]: x for x in news_events}[r["event_candidate_id"]]
+    groups[issue_of(e["dst_doc_id"])].append(
+        (e["dst_publication_year"] // 10 * 10, r["canonical_essay_id"] in POLITICAL))
+cluster = list(groups.values())
+cluster_decade = np.array([c[0][0] for c in cluster])
+
+
+def clustered_shares(assign: np.ndarray) -> np.ndarray:
+    out = []
+    for d in decades:
+        pol = tot = 0
+        for c, a in zip(cluster, assign):
+            if a == d:
+                tot += len(c)
+                pol += sum(p for _, p in c)
+        out.append(pol / tot if tot else 0.0)
+    return np.array(out)
+
+
+rng = np.random.default_rng(20260928)
+obs_cluster = clustered_shares(cluster_decade)
+hits_last = hits_max = 0
+iterations = composition_iterations // 2
+for _ in range(iterations):
+    sh = clustered_shares(rng.permutation(cluster_decade))
+    hits_last += sh[-1] >= obs_cluster[-1] - 1e-12
+    hits_max += sh.max() >= obs_cluster.max() - 1e-12
+report("composition null", "issues / articles carrying the 17 political relations of the 1790s",
+       (len({issue_of(e["dst_doc_id"]) for e in news_events
+             for r in news_rel if r["event_candidate_id"] == e["event_candidate_id"]
+             and r["canonical_essay_id"] in POLITICAL and e["dst_publication_year"] >= 1790}),
+        len({e["dst_doc_id"] for e in news_events
+             for r in news_rel if r["event_candidate_id"] == e["event_candidate_id"]
+             and r["canonical_essay_id"] in POLITICAL and e["dst_publication_year"] >= 1790})),
+       (11, 17))
+report("composition null", "issue-clustered p for the 1790s share",
+       round(hits_last / iterations, 3), 0.002, 0.002)
+report("composition null", "issue-clustered p for the largest of five decades",
+       round(hits_max / iterations, 2), 0.08, 0.03)
+relation_null = []
+for _ in range(composition_iterations):
+    relation_null.append(shares(rng.permutation(political))[-1])
+relation_null = np.array(relation_null)
+report("composition null", "relation-level p (reported as a robustness check)",
+       round(float((relation_null >= obs_share[-1] - 1e-12).mean()), 4), 0.0002, 0.0004)
+rho_null = np.array([spearmanr(range(len(decades)), shares(rng.permutation(political))).statistic
+                     for _ in range(composition_iterations // 10)])
+report("composition null", "trend p", round(float((rho_null >= obs_rho - 1e-12).mean()), 2), 0.18, 0.03)
 
 # ------------------------------------------------ seed-composition control
 print("\nSeed-composition control")
@@ -229,6 +278,30 @@ report("seed control", "political share of confirmed relations",
 legacy_articles = {r["dst_doc_id"] for r in legacy}
 touched = sum(1 for e in news_events if e["dst_doc_id"] in legacy_articles)
 report("seed control", "events on legacy / untouched articles", (touched, len(news_events) - touched), (22, 64))
+holdout = jsonl("04_annotations/sealed_evaluation/newspapers/article_holdout_60.jsonl")
+positives = [r for r in holdout if r["annotation_label"] == "reprint"]
+weights = {"pol": 0.0, "other": 0.0}
+for r in positives:
+    essay = section_to_essay.get(section_key(r))
+    weights["pol" if essay in POLITICAL else "other"] += 1 / r["sampling_probability"]
+report("seed control", "holdout positives",
+       len(positives), 30)
+report("seed control", "weighted political share of holdout positives",
+       round(100 * weights["pol"] / sum(weights.values()), 1), 27.9, 0.1)
+scores = jsonl("05_models/transfer/holdout_scores.jsonl")
+by_sample = {r["sample_id"]: r for r in holdout}
+hit = {"pol": 0.0, "other": 0.0}
+mass = {"pol": 0.0, "other": 0.0}
+for sc in scores:
+    h = by_sample.get(sc["sample_id"])
+    if not h or h["annotation_label"] != "reprint":
+        continue
+    kind = "pol" if section_to_essay.get(section_key(h)) in POLITICAL else "other"
+    mass[kind] += sc["sampling_weight"]
+    if sc["scores"]["newspaper_v1_random_forest"] >= 0.5:
+        hit[kind] += sc["sampling_weight"]
+report("seed control", "weighted holdout recall, political / other",
+       (round(hit["pol"] / mass["pol"], 2), round(hit["other"] / mass["other"], 2)), (1.0, 0.47), 0.01)
 
 # --------------------------------------------------- unreviewed book pool
 print("\nUnreviewed book-side pool")
@@ -247,9 +320,18 @@ neg_frame = neg[0]["stratum_destination_count"]
 neg_pos = sum(r["annotation_label"] == "reprint" for r in neg)
 report("book pool", "negative control draws / frame / positives", (len(neg), neg_frame, neg_pos), (20, 2197, 1))
 ht = sum(cov_pos[k] * cov_frame[k] / cov_draws[k] for k in cov_frame) + neg_pos * neg_frame / len(neg)
-lo, hi = wilson(neg_pos, len(neg))
-report("book pool", "Horvitz-Thompson total", round(ht), 110)
-report("book pool", "scaled Wilson interval", (round(lo * neg_frame), round(hi * neg_frame)), (20, 519))
+report("book pool", "Horvitz-Thompson total from the one positive", round(ht), 110)
+rng = np.random.default_rng(11)
+draws = 50_000 if args.quick else 200_000
+total = np.zeros(draws)
+for name, n_h, y_h, N_h in ([(k, cov_draws[k], cov_pos[k], cov_frame[k]) for k in cov_frame]
+                            + [("negative control", len(neg), neg_pos, neg_frame)]):
+    total += rng.beta(0.5 + y_h, 0.5 + n_h - y_h, draws) * N_h
+report("book pool", "combined Jeffreys median and 95% interval, destinations",
+       (round(float(np.median(total))), round(float(np.quantile(total, 0.025))),
+        round(float(np.quantile(total, 0.975)))), (193, 40, 553), 3)
+report("book pool", "book events per confirmed destination",
+       round(len(book_events) / len({e["dst_doc_id"] for e in book_events}), 2), 2.13)
 
 # ----------------------------------------------- unreviewed newspaper pool
 print("\nUnreviewed newspaper-side pool")
@@ -263,14 +345,19 @@ reviewed_articles = {c["dst_doc_id"] for c in news_candidates}
 consensus_neg = [r for r in holdout if r["sampling_stratum"] == "consensus_non_reprint"]
 unreviewed = [r for r in consensus_neg if r["dst_doc_id"] not in reviewed_articles]
 un_pos = sum(r["annotation_label"] == "reprint" for r in unreviewed)
-lo, hi = wilson(un_pos, len(unreviewed))
 report("newspaper pool", "already reviewed / unreviewed draws",
        (len(consensus_neg) - len(unreviewed), len(unreviewed)), (4, 11))
 report("newspaper pool", "unreviewed positives", un_pos, 0)
-report("newspaper pool", "scaled Wilson interval", (round(lo * 307), round(hi * 307)), (0, 79))
+posterior = rng.beta(0.5 + un_pos, 0.5 + len(unreviewed) - un_pos, draws) * 307
+report("newspaper pool", "Jeffreys median and 95% interval, articles",
+       (round(float(np.median(posterior))), round(float(np.quantile(posterior, 0.975)))), (6, 61), 3)
+other_strata_unreviewed = sum(
+    1 for r in holdout if r["sampling_stratum"] != "consensus_non_reprint"
+    and r["dst_doc_id"] not in reviewed_articles)
+report("newspaper pool", "unreviewed draws in the other three strata", other_strata_unreviewed, 0)
 
 # ------------------------------------------ holdout against event review
-print("\nWhat consolidation and page images add")
+print("\nHoldout against event review (diagnostic)")
 decisions = {r["event_candidate_id"]: r["annotation_label"]
              for r in jsonl("04_annotations/final_event_review/newspapers/review_decisions.jsonl")}
 for o in jsonl("01_events/corrections/final_event_binary_reclassification_v1.jsonl"):
@@ -286,27 +373,67 @@ for h in holdout:
                 pairs.append((h["annotation_label"], label))
             break
 table_ = Counter(pairs)
-report("two passes", "matched holdout articles", len(pairs), 49)
-report("two passes", "agree", table_[("reprint", "reprint")] + table_[("non_reprint", "non_reprint")], 28)
-report("two passes", "event review reprint, holdout not", table_[("non_reprint", "reprint")], 15)
-report("two passes", "holdout reprint, event review not", table_[("reprint", "non_reprint")], 6)
+# Not reported in the article: the two passes saw different evidence, so this
+# compares evidence conditions rather than readers. Kept as a diagnostic.
+diagnostics["holdout against event review"] = {
+    "matched_articles": len(pairs),
+    "agree": table_[("reprint", "reprint")] + table_[("non_reprint", "non_reprint")],
+    "event_review_reprint_holdout_not": table_[("non_reprint", "reprint")],
+    "holdout_reprint_event_review_not": table_[("reprint", "non_reprint")],
+}
+print(f"  [diag] holdout against event review: {diagnostics['holdout against event review']}")
 
 # ------------------------------------------------- threshold-free transfer
 print("\nThreshold-free transfer")
 scores = jsonl("05_models/transfer/holdout_scores.jsonl")
 y = np.array([r["human_label_binary"] for r in scores])
 w = np.array([r["sampling_weight"] for r in scores])
-for label, key, expected in [
-    ("ECCO books", "book_shared_core_zero_shot", (0.491, 0.764, 0.112)),
-    ("Newspaper articles", "newspaper_v1_random_forest", (0.633, 0.882, 0.617)),
-    ("Both, media-balanced", "domain_balanced_pooled__domain_balanced_hgb", (0.517, 0.778, 0.381)),
+def bootstrap(metric, values, n=2000):
+    rng_b = np.random.default_rng(7)
+    out = []
+    for _ in range(n):
+        idx = rng_b.integers(0, len(y), len(y))
+        if len(set(y[idx])) < 2:
+            continue
+        out.append(metric(y[idx], values[idx], sample_weight=w[idx]))
+    out.sort()
+    return round(out[int(0.025 * len(out))], 2), round(out[int(0.975 * len(out))], 2)
+
+
+for label, key, expected, interval in [
+    ("ECCO books", "book_shared_core_zero_shot", (0.491, 0.764, 0.112), ((0.37, 0.76), (0.54, 0.97))),
+    ("Newspaper articles", "newspaper_v1_random_forest", (0.633, 0.882, 0.617), ((0.49, 0.89), (0.73, 0.99))),
+    ("Both, media-balanced", "domain_balanced_pooled__domain_balanced_hgb", (0.517, 0.778, 0.381), ((0.36, 0.84), (0.60, 0.98))),
 ]:
-    s = np.array([r["scores"][key] for r in scores])
-    pr = average_precision_score(y, s, sample_weight=w)
-    roc = roc_auc_score(y, s, sample_weight=w)
-    recall = float(w[(y == 1) & (s >= 0.5)].sum() / w[y == 1].sum())
+    sc = np.array([r["scores"][key] for r in scores])
+    pr = average_precision_score(y, sc, sample_weight=w)
+    roc = roc_auc_score(y, sc, sample_weight=w)
+    recall = float(w[(y == 1) & (sc >= 0.5)].sum() / w[y == 1].sum())
     report("transfer", f"{label} [{key}] PR-AUC, ROC-AUC, recall@0.5",
            (round(pr, 3), round(roc, 3), round(recall, 3)), expected)
+    if not args.quick:
+        report("transfer", f"{label} bootstrap intervals",
+               (bootstrap(average_precision_score, sc), bootstrap(roc_auc_score, sc)), interval, 0.02)
+
+# Recalibration: the map from score to probability is refitted on newspaper
+# development labels; the ranking and the holdout are untouched.
+base = {r["section_candidate_id"]: r["book_base_score"]
+        for r in jsonl("05_models/transfer/book_base_newspaper_scores.jsonl")}
+dev = {r["section_candidate_id"]: 1 if r["label"] == "reprint" else 0
+       for r in jsonl("04_annotations/adaptive_training/newspapers/article_training_labels.jsonl")}
+X = np.array([[base[c]] for c in dev if c in base])
+y_dev = np.array([dev[c] for c in dev if c in base])
+raw = np.array([r["scores"]["book_shared_core_zero_shot"] for r in scores])
+report("transfer", "development rows available for calibration", len(y_dev), 148)
+report("transfer", "holdout candidates also in the development set",
+       len(set(dev) & {r["section_candidate_id"] for r in scores}), 0)
+platt = LogisticRegression(max_iter=1000).fit(X, y_dev).predict_proba(raw.reshape(-1, 1))[:, 1]
+iso = IsotonicRegression(out_of_bounds="clip").fit(X.ravel(), y_dev).predict(raw)
+recall_of = lambda sc: float(w[(y == 1) & (sc >= 0.5)].sum() / w[y == 1].sum())
+report("transfer", "book-fitted recall after Platt scaling", round(recall_of(platt), 3), 0.523, 0.001)
+report("transfer", "book-fitted recall after isotonic regression", round(recall_of(iso), 3), 0.523, 0.001)
+report("transfer", "share of the fixed-threshold gap that is calibration",
+       round((recall_of(platt) - 0.112) / (0.617 - 0.112), 2), 0.81, 0.02)
 
 # ------------------------------------------------ source-side ablation
 print("\nSource-side coverage ablation")
@@ -417,6 +544,99 @@ report("selectivity", "essays", len(essays), 38)
 report("selectivity", "Spearman share vs length", round(float(rho_len), 3), -0.160, 0.001)
 report("selectivity", "permutation p (two-sided)", round(float((np.abs(perm) >= abs(rho_len) - 1e-12).mean()), 2), 0.33, 0.03)
 report("selectivity", "Spearman share vs manifestation count", round(float(rho_cnt), 3), 0.278, 0.001)
+
+# ------------------------------------------- definition and counting units
+print("\nDefinition, counting unit and extent")
+STRICT = {"full_essay_or_nearly_full", "long_continuous_passage"}
+scoped = [e for e in events if e["reprint_scope"]]
+strictly = [e for e in scoped if e["reprint_scope"] in STRICT]
+report("definition", "confirmed records carrying a primary scope", len(scoped), 296)
+report("definition", "full essays or long continuous passages", len(strictly), 202)
+report("definition", "strict count scaled to the final total",
+       round(len(strictly) / len(scoped) * len(events)), 226, 1)
+rejected_short = sum(1 for m in ("books", "newspapers")
+                     for r in jsonl(f"04_annotations/final_event_review/{m}/review_decisions.jsonl")
+                     if r["non_reprint_reason"] == "too_short_or_incidental")
+report("definition", "records rejected as too short or incidental", rejected_short, 30)
+report("definition", "broad count scaled to the final total",
+       round((len(scoped) + rejected_short) / len(scoped) * len(events)), 365, 1)
+
+units = {"A": ["0107500300", "0158700300", "0485200300", "1263400400",
+               "1303300200", "1303300300", "1345100100", "1646900200"],
+         "B": ["0176800700", "1134601100", "1427201900"],
+         "C": ["0212400602", "0730800900", "1353800100", "1497500102"],
+         "D": ["0113000601", "0778400501"],
+         "E": ["0273301900", "0291100700"],
+         "F": ["0906500303", "1311200103"]}
+in_unit = {d: u for u, ds in units.items() for d in ds}
+relations = book_rel + news_rel
+media_of = {e["event_candidate_id"]: e["media_domain"] for e in events}
+scope_of = {e["event_candidate_id"]: (e["reprint_scope"] or e["original_reprint_scope"]) for e in events}
+raw_counts: dict = defaultdict(Counter)
+dedup_counts: dict = defaultdict(Counter)
+seen = set()
+for r in relations:
+    medium = "book" if media_of[r["event_candidate_id"]] == "ecco_book" else "news"
+    raw_counts[r["canonical_essay_id"]][medium] += 1
+    key = (r["canonical_essay_id"], in_unit.get(r["dst_doc_id"], r["dst_doc_id"]), medium)
+    if key not in seen:
+        seen.add(key)
+        dedup_counts[r["canonical_essay_id"]][medium] += 1
+report("definition", "Impudence and Avarice, book relations deduplicated by compilation",
+       (dedup_counts["impudence_modesty"]["book"], dedup_counts["avarice"]["book"]), (27, 11))
+strict_rel = [r for r in relations if scope_of[r["event_candidate_id"]] in STRICT]
+strict_book = [r for r in strict_rel if media_of[r["event_candidate_id"]] == "ecco_book"]
+strict_news = [r for r in strict_rel if media_of[r["event_candidate_id"]] != "ecco_book"]
+report("definition", "strict relations, books / newspapers", (len(strict_book), len(strict_news)), (187, 40))
+report("definition", "political share of book relations, all / strict",
+       (round(100 * sum(1 for r in relations if media_of[r["event_candidate_id"]] == "ecco_book"
+                        and r["canonical_essay_id"] in POLITICAL)
+              / sum(1 for r in relations if media_of[r["event_candidate_id"]] == "ecco_book"), 1),
+        round(100 * sum(1 for r in strict_book if r["canonical_essay_id"] in POLITICAL) / len(strict_book), 1)),
+       (8.0, 6.4), 0.1)
+
+confirmed_books = {e["dst_doc_id"] for e in book_events}
+confirmed_news = {e["dst_doc_id"] for e in news_events}
+matches: Counter = Counter()
+pairs: Counter = Counter()
+for row in jsonl("03_evidence_layers/books/fragments.jsonl"):
+    if row["dst_doc_id"] in confirmed_books and section_to_essay.get(row["source_section_id"]):
+        matches[section_to_essay[row["source_section_id"]]] += 1
+for row in jsonl("03_evidence_layers/newspapers/fragments.jsonl"):
+    if row["dst_doc_id"] in confirmed_news and section_to_essay.get(row["source_section_id"]):
+        matches[section_to_essay[row["source_section_id"]]] += 1
+for row in jsonl("03_evidence_layers/books/passage_candidates.jsonl"):
+    if row["dst_doc_id"] in confirmed_books and section_to_essay.get(row["source_section_id"]):
+        pairs[section_to_essay[row["source_section_id"]]] += 1
+for row in jsonl("03_evidence_layers/newspapers/article_candidates.jsonl"):
+    if row["dst_doc_id"] in confirmed_news and section_to_essay.get(row["source_section_id"]):
+        pairs[section_to_essay[row["source_section_id"]]] += 1
+events_per_essay = Counter(r["canonical_essay_id"] for r in relations)
+rank = lambda c: {k: i + 1 for i, (k, _) in enumerate(c.most_common())}
+rm, rp, re_ = rank(matches), rank(pairs), rank(events_per_essay)
+report("counting units", "totals: matches, pairs, events",
+       (sum(matches.values()), sum(pairs.values()), sum(events_per_essay.values())),
+       (11362, 2827, 339))
+for essay, expected in [("impudence_modesty", (590, 4, 205, 4, 41, 1)),
+                        ("public_credit", (1728, 1, 240, 1, 28, 3)),
+                        ("populousness_ancient_nations", (810, 2, 111, 7, 7, 17))]:
+    report("counting units", f"{essay}: matches, rank, pairs, rank, events, rank",
+           (matches[essay], rm[essay], pairs[essay], rp[essay],
+            events_per_essay[essay], re_[essay]), expected)
+
+extents = sorted(int(float(d["pagecount"])) for d in destinations
+                 if d["structural_type"] == "contiguous run" and d["pagecount"])
+report("definition", "contiguous-run extents recorded, range and median",
+       (len(extents), extents[0], extents[-1], int(np.median(extents))), (14, 96, 418, 350))
+
+frame = sum({r["sampling_stratum"]: r["stratum_destination_population"]
+             for r in holdout}.values())
+report("definition", "newspaper holdout frame", frame, 372)
+queue = jsonl("03_evidence_layers/newspapers/event_candidates.jsonl")
+report("definition", "legacy support links into the review queue, and events reached",
+       (sum(r.get("existing_human_reprint_support_count") or 0 for r in queue),
+        sum(1 for r in queue if (r.get("existing_human_reprint_support_count") or 0) > 0)),
+       (146, 50))
 
 # ---------------------------------------------------------------- summary
 out = ROOT / "06_evidence_tests/reproduction_report.json"
