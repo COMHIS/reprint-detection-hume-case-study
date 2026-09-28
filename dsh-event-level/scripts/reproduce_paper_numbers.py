@@ -551,6 +551,10 @@ STRICT = {"full_essay_or_nearly_full", "long_continuous_passage"}
 scoped = [e for e in events if e["reprint_scope"]]
 strictly = [e for e in scoped if e["reprint_scope"] in STRICT]
 report("definition", "confirmed records carrying a primary scope", len(scoped), 296)
+without = [e for e in events if not e["reprint_scope"]]
+report("definition", "records without a scope: split children, adjudicated after review",
+       (sum(1 for e in without if e["original_reprint_scope"]),
+        sum(1 for e in without if not e["original_reprint_scope"])), (28, 7))
 report("definition", "full essays or long continuous passages", len(strictly), 202)
 report("definition", "strict count scaled to the final total",
        round(len(strictly) / len(scoped) * len(events)), 226, 1)
@@ -612,17 +616,26 @@ for row in jsonl("03_evidence_layers/newspapers/article_candidates.jsonl"):
     if row["dst_doc_id"] in confirmed_news and section_to_essay.get(row["source_section_id"]):
         pairs[section_to_essay[row["source_section_id"]]] += 1
 events_per_essay = Counter(r["canonical_essay_id"] for r in relations)
+pair_sets: dict = defaultdict(set)
+for media, path in [("books", "03_evidence_layers/books/fragments.jsonl"),
+                    ("newspapers", "03_evidence_layers/newspapers/fragments.jsonl")]:
+    confirmed = confirmed_books if media == "books" else confirmed_news
+    for row in jsonl(path):
+        essay = section_to_essay.get(row["source_section_id"])
+        if row["dst_doc_id"] in confirmed and essay:
+            pair_sets[essay].add(row["section_candidate_id"])
+pairs_per_essay = Counter({k: len(v) for k, v in pair_sets.items()})
 rank = lambda c: {k: i + 1 for i, (k, _) in enumerate(c.most_common())}
-rm, rp, re_ = rank(matches), rank(pairs), rank(events_per_essay)
-report("counting units", "totals: matches, pairs, events",
-       (sum(matches.values()), sum(pairs.values()), sum(events_per_essay.values())),
-       (11362, 2827, 339))
-for essay, expected in [("impudence_modesty", (590, 4, 205, 4, 41, 1)),
-                        ("public_credit", (1728, 1, 240, 1, 28, 3)),
-                        ("populousness_ancient_nations", (810, 2, 111, 7, 7, 17))]:
-    report("counting units", f"{essay}: matches, rank, pairs, rank, events, rank",
-           (matches[essay], rm[essay], pairs[essay], rp[essay],
-            events_per_essay[essay], re_[essay]), expected)
+rm, rq, rp, re_ = rank(matches), rank(pairs_per_essay), rank(pairs), rank(events_per_essay)
+report("counting units", "totals: matches, pairs, passages, events",
+       (sum(matches.values()), sum(pairs_per_essay.values()), sum(pairs.values()),
+        sum(events_per_essay.values())), (11362, 2705, 2827, 339))
+for essay, expected in [("impudence_modesty", (590, 4, 205, 3, 205, 4, 41, 1)),
+                        ("public_credit", (1728, 1, 232, 1, 240, 1, 28, 3)),
+                        ("populousness_ancient_nations", (810, 2, 81, 9, 111, 7, 7, 17))]:
+    report("counting units", f"{essay}: matches, pairs, passages, events with ranks",
+           (matches[essay], rm[essay], pairs_per_essay[essay], rq[essay],
+            pairs[essay], rp[essay], events_per_essay[essay], re_[essay]), expected)
 
 spans = {}
 for media, path in [("books", "03_evidence_layers/books/fragments.jsonl"),
@@ -634,14 +647,33 @@ report("definition", "shortest, 1st-percentile and median match, books",
 report("definition", "shortest, 1st-percentile and median match, newspapers",
        spans["newspapers"], (58, 70, 260), 1)
 
-extents = sorted(int(float(d["pagecount"])) for d in destinations
-                 if d["structural_type"] == "contiguous run" and d["pagecount"])
-report("definition", "contiguous-run extents recorded, range and median",
-       (len(extents), extents[0], extents[-1], int(np.median(extents))), (14, 96, 418, 350))
+# The article reports extent in digitised pages (ecco_pages), which is complete
+# for all 115 destinations; the ESTC pagecount field is missing for two of the
+# sixteen and counts differently where it is present.
+extents = sorted(int(float(d["ecco_pages"])) for d in destinations
+                 if d["structural_type"] == "contiguous run" and d["ecco_pages"])
+report("definition", "contiguous-run extents, count, range and median",
+       (len(extents), extents[0], extents[-1], round(float(np.median(extents)))), (16, 96, 410, 352))
+singles = sorted(int(float(d["ecco_pages"])) for d in destinations
+                 if d["structural_type"] == "single" and d["ecco_pages"])
+report("definition", "single-event extents, range, median and count over 300 pages",
+       (singles[0], singles[-1], round(float(np.median(singles))),
+        sum(1 for x in singles if x > 300)), (16, 1115, 311, 39))
 
 frame = sum({r["sampling_stratum"]: r["stratum_destination_population"]
              for r in holdout}.values())
 report("definition", "newspaper holdout frame", frame, 372)
+short = [d for d in destinations if d["document_type"] in ("Pamphlet", "In-between")]
+report("definition", "pamphlets and intermediate destinations, and their events",
+       (sum(1 for d in short if d["document_type"] == "Pamphlet"),
+        sum(1 for d in short if d["document_type"] == "In-between"),
+        sum(int(d["confirmed_events"]) for d in short)), (3, 7, 14))
+report("definition", "events by ECCO module: Literature, Social Sciences, Religion",
+       tuple(sum(int(d["confirmed_events"]) for d in destinations if d["ecco_module"] == m)
+             for m in ("Literature and Language", "Social Sciences", "Religion and Philosophy")),
+       (123, 65, 33))
+report("definition", "octavos and duodecimos among the 115",
+       sum(1 for d in destinations if d["gatherings"] in ("8vo", "12mo")), 108)
 queue = jsonl("03_evidence_layers/newspapers/event_candidates.jsonl")
 report("definition", "legacy support links into the review queue, and events reached",
        (sum(r.get("existing_human_reprint_support_count") or 0 for r in queue),
