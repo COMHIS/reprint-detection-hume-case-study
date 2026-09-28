@@ -624,6 +624,16 @@ for essay, expected in [("impudence_modesty", (590, 4, 205, 4, 41, 1)),
            (matches[essay], rm[essay], pairs[essay], rp[essay],
             events_per_essay[essay], re_[essay]), expected)
 
+spans = {}
+for media, path in [("books", "03_evidence_layers/books/fragments.jsonl"),
+                    ("newspapers", "03_evidence_layers/newspapers/fragments.jsonl")]:
+    lengths = np.array([row["src_trs_end"] - row["src_trs_start"] for row in jsonl(path)])
+    spans[media] = (int(lengths.min()), int(np.percentile(lengths, 1)), int(np.median(lengths)))
+report("definition", "shortest, 1st-percentile and median match, books",
+       spans["books"], (52, 70, 235), 1)
+report("definition", "shortest, 1st-percentile and median match, newspapers",
+       spans["newspapers"], (58, 70, 260), 1)
+
 extents = sorted(int(float(d["pagecount"])) for d in destinations
                  if d["structural_type"] == "contiguous run" and d["pagecount"])
 report("definition", "contiguous-run extents recorded, range and median",
