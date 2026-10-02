@@ -306,8 +306,19 @@ for sc in scores:
     mass[kind] += sc["sampling_weight"]
     if sc["scores"]["newspaper_v1_random_forest"] >= 0.5:
         hit[kind] += sc["sampling_weight"]
-report("seed control", "weighted holdout recall, political / other",
+report("seed control", "weighted holdout recall at 0.5, political / other",
        (round(hit["pol"] / mass["pol"], 2), round(hit["other"] / mass["other"], 2)), (1.0, 0.47), 0.01)
+hit_alloc = {"pol": 0.0, "other": 0.0}
+for sc_row in scores:
+    h = by_sample.get(sc_row["sample_id"])
+    if not h or h["annotation_label"] != "reprint":
+        continue
+    kind = "pol" if section_to_essay.get(section_key(h)) in POLITICAL else "other"
+    if sc_row["scores"]["newspaper_v1_random_forest"] >= 0.05:
+        hit_alloc[kind] += sc_row["sampling_weight"]
+report("seed control", "weighted holdout recall at the 0.05 allocation threshold, political / other",
+       (round(hit_alloc["pol"] / mass["pol"], 2), round(hit_alloc["other"] / mass["other"], 2)),
+       (1.0, 0.52), 0.01)
 
 # ------------------------------------------- book negative-audit observations
 print("\nBook negative-audit observations (no population expansion)")
@@ -441,10 +452,17 @@ report("transfer", "holdout candidates also in the development set",
 platt = LogisticRegression(max_iter=1000).fit(X, y_dev).predict_proba(raw.reshape(-1, 1))[:, 1]
 iso = IsotonicRegression(out_of_bounds="clip").fit(X.ravel(), y_dev).predict(raw)
 recall_of = lambda sc: float(w[(y == 1) & (sc >= 0.5)].sum() / w[y == 1].sum())
-report("transfer", "book-fitted recall after Platt scaling", round(recall_of(platt), 3), 0.523, 0.001)
+precision_of = lambda sc: float(w[(y == 1) & (sc >= 0.5)].sum() / w[sc >= 0.5].sum())
+shared_news = np.array([r["scores"]["domain_calibrator__newspaper_shared_only"] for r in scores])
+report("transfer", "shared-core newspaper fit: recall, precision, PR-AUC, ROC-AUC",
+       (round(recall_of(shared_news), 3), round(precision_of(shared_news), 3),
+        round(average_precision_score(y, shared_news, sample_weight=w), 3),
+        round(roc_auc_score(y, shared_news, sample_weight=w), 3)), (0.351, 0.707, 0.618, 0.865), 0.001)
+report("transfer", "recall distance from the book fit to the shared-core newspaper fit",
+       round(recall_of(shared_news) - recall_of(raw), 3), 0.239, 0.002)
+report("transfer", "book-fitted recall and precision after Platt scaling",
+       (round(recall_of(platt), 3), round(precision_of(platt), 3)), (0.523, 0.616), 0.001)
 report("transfer", "book-fitted recall after isotonic regression", round(recall_of(iso), 3), 0.523, 0.001)
-report("transfer", "share of fixed-threshold recall gap recovered after Platt scaling",
-       round((recall_of(platt) - 0.112) / (0.617 - 0.112), 2), 0.81, 0.02)
 
 # ------------------------------------------------ source-side ablation
 print("\nSource-side coverage ablation")
@@ -595,16 +613,27 @@ for r in relations:
         dedup_counts[r["canonical_essay_id"]][medium] += 1
 report("definition", "Impudence and Avarice, sensitivity count collapsing proposed compiled units",
        (dedup_counts["impudence_modesty"]["book"], dedup_counts["avarice"]["book"]), (27, 11))
-strict_rel = [r for r in relations if scope_of[r["event_candidate_id"]] in STRICT]
+coded_scope = {e["event_candidate_id"]: e["reprint_scope"] for e in events}
+strict_rel = [r for r in relations if coded_scope[r["event_candidate_id"]] in STRICT]
+inherited = [r for r in relations if scope_of[r["event_candidate_id"]] in STRICT]
+diagnostics["strict relations if children inherit the parent scope"] = {
+    "books": sum(1 for r in inherited if media_of[r["event_candidate_id"]] == "ecco_book"),
+    "newspapers": sum(1 for r in inherited if media_of[r["event_candidate_id"]] != "ecco_book"),
+    "note": "a long continuous parent divided into several positions need not leave each long",
+}
 strict_book = [r for r in strict_rel if media_of[r["event_candidate_id"]] == "ecco_book"]
 strict_news = [r for r in strict_rel if media_of[r["event_candidate_id"]] != "ecco_book"]
-report("definition", "strict relations, books / newspapers", (len(strict_book), len(strict_news)), (187, 40))
+report("definition", "strict relations with a directly coded scope, books / newspapers",
+       (len(strict_book), len(strict_news)), (165, 40))
+print("  [diag] inheriting the parent scope would give "
+      f"{diagnostics['strict relations if children inherit the parent scope']['books']} and "
+      f"{diagnostics['strict relations if children inherit the parent scope']['newspapers']}")
 report("definition", "political share of book relations, all / strict",
        (round(100 * sum(1 for r in relations if media_of[r["event_candidate_id"]] == "ecco_book"
                         and r["canonical_essay_id"] in POLITICAL)
               / sum(1 for r in relations if media_of[r["event_candidate_id"]] == "ecco_book"), 1),
         round(100 * sum(1 for r in strict_book if r["canonical_essay_id"] in POLITICAL) / len(strict_book), 1)),
-       (8.0, 6.4), 0.1)
+       (8.0, 7.3), 0.1)
 
 confirmed_books = {e["dst_doc_id"] for e in book_events}
 confirmed_news = {e["dst_doc_id"] for e in news_events}
@@ -679,6 +708,12 @@ report("definition", "events by ECCO module: Literature, Social Sciences, Religi
        tuple(sum(int(d["confirmed_events"]) for d in destinations if d["ecco_module"] == m)
              for m in ("Literature and Language", "Social Sciences", "Religion and Philosophy")),
        (123, 65, 33))
+imp = [r for r in book_rel if r["canonical_essay_id"] == "impudence_modesty"]
+imp_dst = {r["dst_doc_id"] for r in imp}
+work_of_dst = {d["dst_doc_id"]: d["work_id"] for d in destinations}
+report("definition", "Of Impudence and Modesty: book relations, destinations, work groups, collapsed units",
+       (len(imp), len(imp_dst), len({work_of_dst[d] for d in imp_dst}),
+        len({in_unit.get(d, d) for d in imp_dst})), (39, 39, 24, 27))
 report("definition", "octavos and duodecimos among the 115",
        sum(1 for d in destinations if d["gatherings"] in ("8vo", "12mo")), 108)
 queue = jsonl("03_evidence_layers/newspapers/event_candidates.jsonl")
