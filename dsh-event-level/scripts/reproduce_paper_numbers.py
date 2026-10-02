@@ -76,6 +76,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--quick", action="store_true", help="fewer permutations")
 parser.add_argument("--release", type=Path, default=ROOT,
                     help="root of the data release (default: the directory above this script)")
+parser.add_argument("--output", type=Path,
+                    help="report path (default: 06_evidence_tests/reproduction_report.json)")
 args = parser.parse_args()
 ROOT = args.release
 annual_iterations = 200 if args.quick else 2_000
@@ -105,6 +107,10 @@ passages = jsonl("03_evidence_layers/books/passage_candidates.jsonl")
 articles = jsonl("03_evidence_layers/newspapers/article_candidates.jsonl")
 report("units", "section candidates carrying passages", len({p["section_candidate_id"] for p in passages}), 20_568)
 report("units", "classification candidates", len(passages) + len(articles), 27_232)
+report("units", "section candidates splitting into two or more passages",
+       sum(1 for n in Counter(p["section_candidate_id"] for p in passages).values() if n >= 2), 2_162)
+report("units", "newspaper articles carrying candidates",
+       len({a["dst_doc_id"] for a in articles}), 456)
 training = (len(jsonl("04_annotations/adaptive_training/books/passage_training_labels.jsonl"))
             + len(jsonl("04_annotations/adaptive_training/newspapers/article_training_labels.jsonl")))
 report("units", "training records", training, 1_813)
@@ -303,38 +309,42 @@ for sc in scores:
 report("seed control", "weighted holdout recall, political / other",
        (round(hit["pol"] / mass["pol"], 2), round(hit["other"] / mass["other"], 2)), (1.0, 0.47), 0.01)
 
-# --------------------------------------------------- unreviewed book pool
-print("\nUnreviewed book-side pool")
+# ------------------------------------------- book negative-audit observations
+print("\nBook negative-audit observations (no population expansion)")
 coverage = json.loads((ROOT / "04_annotations/sealed_evaluation/books/passage_coverage_negative_audit_60_manifest.json").read_text())
 cov_rows = jsonl("04_annotations/sealed_evaluation/books/passage_coverage_negative_audit_60.jsonl")
 cov_frame = {k: v["destination_count_before_cross_stratum_destination_exclusion"]
              for k, v in coverage["coverage_frame_counts"].items()}
 cov_draws = Counter(r["sampling_stratum"] for r in cov_rows)
 cov_pos = Counter(r["sampling_stratum"] for r in cov_rows if r["annotation_label"] == "reprint")
-report("book pool", "coverage audit draws of frame",
+report("book audit", "draws / pre-exclusion frame memberships (overlap allowed)",
        sorted((cov_draws[k], cov_frame[k]) for k in cov_frame), sorted([(4, 4), (16, 196), (20, 636), (20, 1773)]))
-report("book pool", "coverage audit positives", sum(cov_pos.values()), 0)
+report("book audit", "unique destinations in coverage frame",
+       coverage["strict_unseen_destination_eligible_destination_count"], 2178)
+report("book audit", "eligible passages in coverage frame",
+       coverage["strict_unseen_destination_eligible_passage_count"], 9964)
+report("book audit", "sum of overlapping destination memberships", sum(cov_frame.values()), 2609)
+report("book audit", "coverage audit sampled passages / positives",
+       (len(cov_rows), sum(cov_pos.values())), (60, 0))
 v3 = jsonl("04_annotations/sealed_evaluation/books/passage_validation_v3_40.jsonl")
 neg = [r for r in v3 if r["sampling_stratum"].startswith("training_unseen_destination_negative_control")]
 neg_frame = neg[0]["stratum_destination_count"]
 neg_pos = sum(r["annotation_label"] == "reprint" for r in neg)
-report("book pool", "negative control draws / frame / positives", (len(neg), neg_frame, neg_pos), (20, 2197, 1))
-ht = sum(cov_pos[k] * cov_frame[k] / cov_draws[k] for k in cov_frame) + neg_pos * neg_frame / len(neg)
-report("book pool", "Horvitz-Thompson total from the one positive", round(ht), 110)
-rng = np.random.default_rng(11)
-draws = 50_000 if args.quick else 200_000
-total = np.zeros(draws)
-for name, n_h, y_h, N_h in ([(k, cov_draws[k], cov_pos[k], cov_frame[k]) for k in cov_frame]
-                            + [("negative control", len(neg), neg_pos, neg_frame)]):
-    total += rng.beta(0.5 + y_h, 0.5 + n_h - y_h, draws) * N_h
-report("book pool", "combined Jeffreys median and 95% interval, destinations",
-       (round(float(np.median(total))), round(float(np.quantile(total, 0.025))),
-        round(float(np.quantile(total, 0.975)))), (193, 40, 553), 3)
-report("book pool", "book events per confirmed destination",
-       round(len(book_events) / len({e["dst_doc_id"] for e in book_events}), 2), 2.13)
+report("book audit", "negative control draws / frame / positives", (len(neg), neg_frame, neg_pos), (20, 2197, 1))
+assert sum(cov_frame.values()) > coverage["strict_unseen_destination_eligible_destination_count"]
+assert all(r["sampling_probability_is_conditional"] for r in cov_rows)
+diagnostics["book negative audits"] = {
+    "population_estimate": None,
+    "reason": "Destination frames overlap; labels classify one sampled passage, not all occurrences in a destination.",
+    "conditional_sampling_probabilities_preserved": True,
+}
+# No longer reported in the article, which gives no destination-to-event
+# conversion; kept as a diagnostic because the ratio describes the record.
+diagnostics["book events per confirmed destination"] = round(
+    len(book_events) / len({e["dst_doc_id"] for e in book_events}), 2)
 
-# ----------------------------------------------- unreviewed newspaper pool
-print("\nUnreviewed newspaper-side pool")
+# ------------------------------------------- newspaper negative-audit observations
+print("\nNewspaper negative-audit observations (no population expansion)")
 holdout = jsonl("04_annotations/sealed_evaluation/newspapers/article_holdout_60.jsonl")
 strata = Counter((r["sampling_stratum"], r["stratum_destination_population"]) for r in holdout)
 report("newspaper pool", "holdout strata", sorted(strata.items()), sorted({
@@ -348,9 +358,10 @@ un_pos = sum(r["annotation_label"] == "reprint" for r in unreviewed)
 report("newspaper pool", "already reviewed / unreviewed draws",
        (len(consensus_neg) - len(unreviewed), len(unreviewed)), (4, 11))
 report("newspaper pool", "unreviewed positives", un_pos, 0)
-posterior = rng.beta(0.5 + un_pos, 0.5 + len(unreviewed) - un_pos, draws) * 307
-report("newspaper pool", "Jeffreys median and 95% interval, articles",
-       (round(float(np.median(posterior))), round(float(np.quantile(posterior, 0.975)))), (6, 61), 3)
+diagnostics["newspaper negative audit"] = {
+    "population_estimate": None,
+    "reason": "One fixed section-article candidate per sampled article; no exhaustive article or event outcome.",
+}
 other_strata_unreviewed = sum(
     1 for r in holdout if r["sampling_stratum"] != "consensus_non_reprint"
     and r["dst_doc_id"] not in reviewed_articles)
@@ -432,7 +443,7 @@ iso = IsotonicRegression(out_of_bounds="clip").fit(X.ravel(), y_dev).predict(raw
 recall_of = lambda sc: float(w[(y == 1) & (sc >= 0.5)].sum() / w[y == 1].sum())
 report("transfer", "book-fitted recall after Platt scaling", round(recall_of(platt), 3), 0.523, 0.001)
 report("transfer", "book-fitted recall after isotonic regression", round(recall_of(iso), 3), 0.523, 0.001)
-report("transfer", "share of the fixed-threshold gap that is calibration",
+report("transfer", "share of fixed-threshold recall gap recovered after Platt scaling",
        round((recall_of(platt) - 0.112) / (0.617 - 0.112), 2), 0.81, 0.02)
 
 # ------------------------------------------------ source-side ablation
@@ -556,14 +567,10 @@ report("definition", "records without a scope: split children, adjudicated after
        (sum(1 for e in without if e["original_reprint_scope"]),
         sum(1 for e in without if not e["original_reprint_scope"])), (28, 7))
 report("definition", "full essays or long continuous passages", len(strictly), 202)
-report("definition", "strict count scaled to the final total",
-       round(len(strictly) / len(scoped) * len(events)), 226, 1)
 rejected_short = sum(1 for m in ("books", "newspapers")
                      for r in jsonl(f"04_annotations/final_event_review/{m}/review_decisions.jsonl")
                      if r["non_reprint_reason"] == "too_short_or_incidental")
 report("definition", "records rejected as too short or incidental", rejected_short, 30)
-report("definition", "broad count scaled to the final total",
-       round((len(scoped) + rejected_short) / len(scoped) * len(events)), 365, 1)
 
 units = {"A": ["0107500300", "0158700300", "0485200300", "1263400400",
                "1303300200", "1303300300", "1345100100", "1646900200"],
@@ -586,7 +593,7 @@ for r in relations:
     if key not in seen:
         seen.add(key)
         dedup_counts[r["canonical_essay_id"]][medium] += 1
-report("definition", "Impudence and Avarice, book relations deduplicated by compilation",
+report("definition", "Impudence and Avarice, sensitivity count collapsing proposed compiled units",
        (dedup_counts["impudence_modesty"]["book"], dedup_counts["avarice"]["book"]), (27, 11))
 strict_rel = [r for r in relations if scope_of[r["event_candidate_id"]] in STRICT]
 strict_book = [r for r in strict_rel if media_of[r["event_candidate_id"]] == "ecco_book"]
@@ -627,13 +634,13 @@ for media, path in [("books", "03_evidence_layers/books/fragments.jsonl"),
 pairs_per_essay = Counter({k: len(v) for k, v in pair_sets.items()})
 rank = lambda c: {k: i + 1 for i, (k, _) in enumerate(c.most_common())}
 rm, rq, rp, re_ = rank(matches), rank(pairs_per_essay), rank(pairs), rank(events_per_essay)
-report("counting units", "totals: matches, pairs, passages, events",
+report("counting units", "totals: matches, pairs, passages, event-essay relations",
        (sum(matches.values()), sum(pairs_per_essay.values()), sum(pairs.values()),
         sum(events_per_essay.values())), (11362, 2705, 2827, 339))
 for essay, expected in [("impudence_modesty", (590, 4, 205, 3, 205, 4, 41, 1)),
                         ("public_credit", (1728, 1, 232, 1, 240, 1, 28, 3)),
                         ("populousness_ancient_nations", (810, 2, 81, 9, 111, 7, 7, 17))]:
-    report("counting units", f"{essay}: matches, pairs, passages, events with ranks",
+    report("counting units", f"{essay}: matches, pairs, passages, event-essay relations with ranks",
            (matches[essay], rm[essay], pairs_per_essay[essay], rq[essay],
             pairs[essay], rp[essay], events_per_essay[essay], re_[essay]), expected)
 
@@ -681,8 +688,8 @@ report("definition", "legacy support links into the review queue, and events rea
        (146, 50))
 
 # ---------------------------------------------------------------- summary
-out = ROOT / "06_evidence_tests/reproduction_report.json"
+out = args.output or ROOT / "06_evidence_tests/reproduction_report.json"
 out.write_text(json.dumps({"results": results, "diagnostics": diagnostics}, indent=2, default=str), encoding="utf-8")
 diffs = [r for r in results if not r["match"]]
-print(f"\n{len(results) - len(diffs)} of {len(results)} reported quantities reproduced; report written to {out.relative_to(ROOT)}")
-sys.exit(0)
+print(f"\n{len(results) - len(diffs)} of {len(results)} quantities reproduced; report written to {out}")
+sys.exit(1 if diffs else 0)
