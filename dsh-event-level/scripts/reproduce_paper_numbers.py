@@ -125,7 +125,7 @@ by_type = defaultdict(lambda: [0, 0])
 for d in destinations:
     by_type[d["structural_type"]][0] += 1
     by_type[d["structural_type"]][1] += int(d["confirmed_events"])
-for name, expected in [("single", [70, 70]), ("contiguous run", [16, 37]),
+for name, expected in [("single", [70, 70]), ("continuous block", [16, 37]),
                        ("dispersed, one per essay", [25, 114]), ("dispersed, recurring essay", [4, 24])]:
     report("typology", f"{name} (destinations, events)", by_type.get(name), expected)
 
@@ -145,7 +145,8 @@ works = list(work_years)
 slots = [len(set(by_year[y])) for y in sorted(by_year)]
 
 # Block permutation: each (work, year) pair keeps its event count and the year
-# labels are permuted across blocks, so every year keeps its number of works.
+# labels are permuted across blocks, so every year keeps its number of blocks.
+# Distinct-work counts may fall when blocks of the same work share a new year.
 blocks = Counter((e["dst_publication_year"], work_of[e["dst_doc_id"]]) for e in dated)
 b_years, b_works, b_sizes = [k[0] for k in blocks], [k[1] for k in blocks], list(blocks.values())
 
@@ -158,7 +159,20 @@ def block_statistic(years_: list) -> float:
 
 
 rng = np.random.default_rng(7)
-null = np.sort(np.array([block_statistic(list(rng.permutation(b_years))) for _ in range(annual_iterations)]))
+null_values = []
+permutations_with_work_collisions = 0
+for _ in range(annual_iterations):
+    shuffled_years = list(rng.permutation(b_years))
+    assert Counter(shuffled_years) == Counter(b_years)
+    permutations_with_work_collisions += len(set(zip(shuffled_years, b_works))) < len(blocks)
+    null_values.append(block_statistic(shuffled_years))
+null = np.sort(np.array(null_values))
+diagnostics["annual null preserved units"] = {
+    "blocks": len(blocks),
+    "permutations": annual_iterations,
+    "permutations_with_work_collisions": permutations_with_work_collisions,
+    "note": "Preserves year-wise block counts and block sizes, not distinct-work counts per year.",
+}
 report("annual null", "observed statistic", round(observed, 3), 0.712)
 report("annual null", "null mean", round(float(null.mean()), 3), 0.725, 0.005)
 if not args.quick:
@@ -454,12 +468,18 @@ iso = IsotonicRegression(out_of_bounds="clip").fit(X.ravel(), y_dev).predict(raw
 recall_of = lambda sc: float(w[(y == 1) & (sc >= 0.5)].sum() / w[y == 1].sum())
 precision_of = lambda sc: float(w[(y == 1) & (sc >= 0.5)].sum() / w[sc >= 0.5].sum())
 shared_news = np.array([r["scores"]["domain_calibrator__newspaper_shared_only"] for r in scores])
-report("transfer", "shared-core newspaper fit: recall, precision, PR-AUC, ROC-AUC",
+report("transfer", "shared-core newspaper logistic fit: recall, precision, PR-AUC, ROC-AUC",
        (round(recall_of(shared_news), 3), round(precision_of(shared_news), 3),
         round(average_precision_score(y, shared_news, sample_weight=w), 3),
         round(roc_auc_score(y, shared_news, sample_weight=w), 3)), (0.351, 0.707, 0.618, 0.865), 0.001)
 report("transfer", "recall distance from the book fit to the shared-core newspaper fit",
-       round(recall_of(shared_news) - recall_of(raw), 3), 0.239, 0.002)
+       round(recall_of(shared_news) - recall_of(raw), 3), 0.238, 0.001)
+diagnostics["transfer comparison scope"] = {
+    "book": "shared-core HGB",
+    "newspaper_shared": "class-balanced, destination-weighted logistic regression",
+    "newspaper_operational": "random forest; two features differ from the shared core",
+    "note": "The recall differences do not isolate training domain from algorithm or training design.",
+}
 report("transfer", "book-fitted recall and precision after Platt scaling",
        (round(recall_of(platt), 3), round(precision_of(platt), 3)), (0.523, 0.616), 0.001)
 report("transfer", "book-fitted recall after isotonic regression", round(recall_of(iso), 3), 0.523, 0.001)
@@ -496,13 +516,17 @@ et_best = max(siblings, key=unconditional.get)
 gain = [e for e in events if support[e["event_candidate_id"]] & siblings and et_best not in support[e["event_candidate_id"]]]
 absent = [e for e in gain if not essays_of[e["event_candidate_id"]] & contents[et_best]]
 report("ablation", "work-level gain / from essays absent in best volume", (len(gain), len(absent)), (88, 76))
+report("ablation", "best volume / best work group as % of events; share of gain from absent essays",
+       (round(100 * unconditional[best] / len(events), 1),
+        round(100 * max(len(v) for v in by_work.values()) / len(events), 1),
+        round(100 * len(absent) / len(gain))), (70.4, 97.0, 86))
 
 # -------------------------------------------------- recurring compiled units
 print("\nRecurring compiled units")
 events_per_dst = Counter(e["dst_doc_id"] for e in book_events)
 
 
-def compiled_units(ordered: dict) -> list[list[str]]:
+def compiled_units(ordered: dict, symmetric: bool = False) -> list[list[str]]:
     parent = {d: d for d in ordered}
 
     def find(d: str) -> str:
@@ -518,7 +542,10 @@ def compiled_units(ordered: dict) -> list[list[str]]:
             if [x[2] for x in pa] != [x[2] for x in pb]:
                 continue
             delta = [x[0] - z[0] for x, z in zip(pa, pb)]
-            if max(delta) - min(delta) < 0.05 * (pa[-1][1] - pa[0][0]):
+            footprint = pa[-1][1] - pa[0][0]
+            if symmetric:
+                footprint = max(footprint, pb[-1][1] - pb[0][0])
+            if max(delta) - min(delta) < 0.05 * footprint:
                 parent[find(a)] = find(b)
     groups = defaultdict(list)
     for d in keys:
@@ -546,9 +573,109 @@ report("compiled units", "units / destinations / events",
        (len(units_essay), sum(map(len, units_essay)),
         sum(events_per_dst[d] for g in units_essay for d in g)), (6, 21, 75))
 report("compiled units", "single-event destinations", sum(1 for n in events_per_dst.values() if n == 1), 70)
+dst_row = {d["dst_doc_id"]: d for d in destinations}
+report("compiled units", "per unit: volumes, work-field values, first and last year (Table 6)",
+       sorted((len(g), len({dst_row[d]["work_id"] for d in g}),
+               min(int(dst_row[d]["publication_year"]) for d in g),
+               max(int(dst_row[d]["publication_year"]) for d in g)) for g in units_essay),
+       sorted([(8, 5, 1764, 1799), (3, 2, 1776, 1795), (4, 2, 1785, 1797),
+               (2, 1, 1772, 1775), (2, 2, 1770, 1780), (2, 2, 1762, 1762)]))
+# Appendix E, "The same test outside its filter". The original script is not
+# preserved; this reimplementation follows the stated procedure. Positions merge
+# overlapping passages per destination and canonical essay (source section where
+# unmapped). The tolerance uses the larger of the two footprints, which gives the
+# same six units on the confirmed record and reproduces the counts below.
+screen_groups = defaultdict(list)
+screen_best = defaultdict(float)
+for r in jsonl("05_models/books/passage_workflow_scores.jsonl"):
+    if r["chronology_status"] != "valid_dst_after_src":
+        continue
+    key = section_to_essay.get(r["source_section_id"], r["source_section_id"])
+    screen_groups[(r["dst_doc_id"], key)].append((r["dst_start"], r["dst_end"]))
+    screen_best[r["dst_doc_id"]] = max(screen_best[r["dst_doc_id"]], r["hgb_probability"] or 0.0)
+screen_positions = defaultdict(list)
+for (d, key), spans in screen_groups.items():
+    merged = []
+    for a, b in sorted(spans):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    screen_positions[d] += [(a, b, key) for a, b in merged]
+screen_ordered = {d: sorted(v) for d, v in screen_positions.items() if len(v) >= 2}
+screen_units = compiled_units(screen_ordered, symmetric=True)
+def unit_drift(a: str, b: str) -> int:
+    delta = [x[0] - z[0] for x, z in zip(screen_ordered[a], screen_ordered[b])]
+    return max(delta) - min(delta)
+screen_kept = [u for u in screen_units if len(screen_ordered[u[0]]) >= 3 and
+               np.median([unit_drift(a, b) for i, a in enumerate(u) for b in u[i + 1:]]) < 5000]
+screen_scores = [float(np.median([screen_best[d] for d in u])) for u in screen_kept]
+known_units = [set(u) for u in units_essay]
+book_event_dsts = {e["dst_doc_id"] for e in book_events}
+report("compiled units", "screen outside the filter: positions, destinations, kept units, kept with confirmed events",
+       (sum(map(len, screen_positions.values())), len(screen_positions), len(screen_kept),
+        sum(1 for u in screen_kept for d in u if d in book_event_dsts)), (6790, 3151, 49, 8))
+report("compiled units", "screen: known units recovered / exactly; kept units below 0.1 / above 0.3",
+       (sum(1 for k in known_units if any(k & set(u) for u in screen_units)),
+        sum(1 for k in known_units if any(k == set(u) for u in screen_units)),
+        sum(1 for x in screen_scores if x < 0.1), sum(1 for x in screen_scores if x > 0.3)), (5, 4, 43, 5))
+high_units = [u for u, x in zip(screen_kept, screen_scores) if x > 0.3]
+new_high = [u for u in high_units if not any(set(u) & k for k in known_units)]
+report("compiled units", "screen: candidate units, destinations in kept units, known / new units above 0.3, destinations in new units",
+       (len(screen_units), sum(map(len, screen_kept)),
+        len(high_units) - len(new_high), len(new_high), sum(map(len, new_high))),
+       (135, 215, 3, 2, 4))
+labelled_units = defaultdict(set)
+for d in destinations:
+    if d["recurring_unit"]:
+        labelled_units[d["recurring_unit"]].add(d["dst_doc_id"])
+report("compiled units", "released recurring_unit column equals the detected units",
+       sorted(map(sorted, labelled_units.values())) == sorted(map(sorted, units_essay)), True)
+unit_a = table("02_destinations/books/unit_a_editions.csv")
+numbered = sorted((int(r["publication_year"]), r["edition_statement"].split(",")[0]) for r in unit_a
+                  if re.search(r"\b(fourth|eighth|ninth|nineteenth)\b", r["edition_statement"], re.I))
+report("compiled units", "Unit A: volumes, numbered editions (year), Hume pages in the 4th/8th/9th",
+       (len(unit_a), [y for y, _ in numbered],
+        sorted({(r["page_of_impudence_and_modesty"], r["page_of_avarice"]) for r in unit_a
+                if int(r["publication_year"]) in (1764, 1777, 1781)})),
+       (8, [1764, 1777, 1781, 1799], [("3", "5")]))
+parnell = [d for d in destinations if d["work_id"].startswith("898-")]
+hive = [d for d in destinations if d["work_id"].startswith("X-the hive: or a")]
+report("compiled units", "work field: Parnell editions, first/last year, places; Hive volumes / groups; title-shaped values",
+       (len(parnell), min(int(d["publication_year"]) for d in parnell),
+        max(int(d["publication_year"]) for d in parnell), len({d["publication_place"] for d in parnell}),
+        len(hive), len({d["work_id"] for d in hive}),
+        sum(1 for d in destinations if d["work_id"].startswith("X-"))),
+       (4, 1752, 1771, 3, 5, 2, 68))
+report("compiled units", "source manifestations per derived work group",
+       sorted(Counter(r["estc_work_id"] for r in table("07_sources/hume_source_manifestations.csv")).values()),
+       [3, 6, 8])
+
+# ------------------------------------------------ evaluation sets (Section 5)
+print("\nEvaluation sets")
+forty = jsonl("05_models/books/independent_40_sample_predictions.jsonl")
+y40 = np.array([r["human_label"] == "reprint" for r in forty], dtype=int)
+p40 = np.array([r["model_probabilities"]["v3_structure_aware"] for r in forty])
+controls = [r for r in forty if r["sampling_stratum"].startswith("training_unseen_destination_negative_control")]
+report("evaluation", "forty-passage set: PR-AUC, positives found / positives, false positives, controls / control positives",
+       (round(average_precision_score(y40, p40), 2), int(((p40 >= 0.5) & (y40 == 1)).sum()), int(y40.sum()),
+        int(((p40 >= 0.5) & (y40 == 0)).sum()), len(controls),
+        sum(1 for r in controls if r["human_label"] == "reprint")),
+       (0.61, 11, 12, 9, 20, 1))
+holdout_report = json.loads((ROOT / "05_models/transfer/holdout_evaluation_report.json").read_text())
+rf_holdout = holdout_report["model_results_at_0_5"]["newspaper_v1_random_forest"]["destination_representative_population_weighted"]
+# The gate (accuracy, precision and recall each at least 0.85) is recorded upstream in
+# active-learning/outputs/cross_media_newspaper_v1/article_validation_v1/validation_report.json.
+GATE = 0.85
+passing = [k for k, v in holdout_report["model_results_at_0_5"].items()
+           if all(v["destination_representative_population_weighted"].get(m, 0) >= GATE
+                  for m in ("accuracy", "reprint_precision", "reprint_recall"))]
+report("evaluation", "holdout random forest weighted recall / precision; models passing the 85% gate",
+       (round(rf_holdout["reprint_recall"], 3), round(rf_holdout["reprint_precision"], 3), len(passing)),
+       (0.617, 0.577, 0))
 
 # -------------------------------------------------------- media selectivity
-print("\nMedia selectivity controlled for length and availability")
+print("\nMedia selectivity, length and source-set coverage")
 sections = {r["source_section_id"]: int(r["src_section_length"])
             for r in table("07_sources/included_essay_sections.csv")}
 lengths, manifestations = defaultdict(list), defaultdict(set)
@@ -599,6 +726,12 @@ units = {"A": ["0107500300", "0158700300", "0485200300", "1263400400",
          "F": ["0906500303", "1311200103"]}
 in_unit = {d: u for u, ds in units.items() for d in ds}
 relations = book_rel + news_rel
+impudence = [r for r in book_rel if r["canonical_essay_id"] == "impudence_modesty"]
+report("definition", "Impudence relations / destinations / derived work groups",
+       (len(impudence), len({r["dst_doc_id"] for r in impudence}),
+        len({work_of[r["dst_doc_id"]] for r in impudence})), (39, 39, 24))
+report("source mapping", "manifestations containing The Stoic in the canonical mapping",
+       len({s.split("::")[0] for s, essay in section_to_essay.items() if essay == "stoic"}), 9)
 media_of = {e["event_candidate_id"]: e["media_domain"] for e in events}
 scope_of = {e["event_candidate_id"]: (e["reprint_scope"] or e["original_reprint_scope"]) for e in events}
 raw_counts: dict = defaultdict(Counter)
@@ -625,9 +758,20 @@ strict_book = [r for r in strict_rel if media_of[r["event_candidate_id"]] == "ec
 strict_news = [r for r in strict_rel if media_of[r["event_candidate_id"]] != "ecco_book"]
 report("definition", "strict relations with a directly coded scope, books / newspapers",
        (len(strict_book), len(strict_news)), (165, 40))
+report("definition", "relations under the parent-scope inheritance assumption, books / newspapers",
+       (diagnostics["strict relations if children inherit the parent scope"]["books"],
+        diagnostics["strict relations if children inherit the parent scope"]["newspapers"]), (187, 40))
 print("  [diag] inheriting the parent scope would give "
       f"{diagnostics['strict relations if children inherit the parent scope']['books']} and "
       f"{diagnostics['strict relations if children inherit the parent scope']['newspapers']}")
+four_essays = ("impudence_modesty", "avarice", "liberty_press", "public_credit")
+strict_book_by = Counter(r["canonical_essay_id"] for r in strict_book)
+strict_news_by = Counter(r["canonical_essay_id"] for r in strict_news)
+report("definition", "Appendix E restrictions table: collapsed and full-or-long book / newspaper counts",
+       [(dedup_counts[k]["book"], dedup_counts[k]["news"], strict_book_by[k], strict_news_by[k]) for k in four_essays],
+       [(27, 2, 27, 1), (11, 3, 13, 1), (9, 19, 8, 11), (10, 18, 4, 7)])
+report("definition", "political share of newspaper relations, full-or-long only",
+       round(100 * sum(1 for r in strict_news if r["canonical_essay_id"] in POLITICAL) / len(strict_news), 1), 45.0, 0.1)
 report("definition", "political share of book relations, all / strict",
        (round(100 * sum(1 for r in relations if media_of[r["event_candidate_id"]] == "ecco_book"
                         and r["canonical_essay_id"] in POLITICAL)
@@ -673,6 +817,119 @@ for essay, expected in [("impudence_modesty", (590, 4, 205, 3, 205, 4, 41, 1)),
            (matches[essay], rm[essay], pairs_per_essay[essay], rq[essay],
             pairs[essay], rp[essay], events_per_essay[essay], re_[essay]), expected)
 
+# Figure 1 follows one essay through the layer in volume 1 of the 1786
+# Philosophical Dictionary (ESTC T108878).
+DICT_VOL1, DICT_ESSAY = "0211200401", "rise_arts_sciences"
+in_dict = lambda r: (r["dst_doc_id"] == DICT_VOL1
+                     and section_to_essay.get(r["source_section_id"]) == DICT_ESSAY)
+dict_fragments = [r for r in jsonl("03_evidence_layers/books/fragments.jsonl") if in_dict(r)]
+dict_passages = [r for r in jsonl("03_evidence_layers/books/passage_candidates.jsonl") if in_dict(r)]
+dict_events = [e for e in book_events
+               if e["dst_doc_id"] == DICT_VOL1 and DICT_ESSAY in e["canonical_essay_ids"]]
+report("counting units", "1786 dictionary vol. 1, one essay: matches, pairs, passages, events, other events in volume",
+       (len(dict_fragments), len({r["section_candidate_id"] for r in dict_fragments}),
+        len(dict_passages), len(dict_events),
+        sum(1 for e in book_events if e["dst_doc_id"] == DICT_VOL1) - len(dict_events)),
+       (128, 9, 35, 4, 5))
+
+# ------------------------------------------------- construction (Section 4)
+print("\nConstruction")
+manifest = lambda name: json.loads((ROOT / f"09_provenance/stage_manifests/{name}.json").read_text())
+seg = manifest("segmentation_v2")
+report("construction", "book edges linked by overlap / linked by model / split by model; passages",
+       (seg["edge_decision_counts"]["link_destination_overlap"],
+        seg["edge_decision_counts"]["link_supervised_v2"],
+        seg["edge_decision_counts"]["split_supervised_v2"],
+        len(jsonl("03_evidence_layers/books/passage_candidates.jsonl"))),
+       (8202, 8513, 3452, 24020))
+link = manifest("passage_link_model_v2")
+link_oof = jsonl("05_models/books/link_edge_oof_predictions.jsonl")
+report("construction", "link labels / audits / destinations / edge features",
+       (len(link_oof), len({r["audit_id"] for r in link_oof}),
+        len({r["dst_doc_id"] for r in link_oof}), link["feature_count"]),
+       (110, 3, 87, 9))
+report("construction", "link macro-F1: random forest, logistic, tree, fixed-gap rule, Gaussian mixture",
+       tuple(round(link[group][name]["macro_f1_at_0_5"], 3) for group, name in
+             [("model_metrics", "link_random_forest_v1"), ("model_metrics", "link_logistic_v1"),
+              ("model_metrics", "link_tree_v1"), ("baseline_metrics", "legacy_chain_bundle"),
+              ("baseline_metrics", "provisional_gmm_v1")]),
+       (0.926, 0.903, 0.869, 0.447, 0.377))
+# The fold split is not stored; StratifiedGroupKFold depends only on the label
+# and group order, so the recorded seed rebuilds it from the out-of-fold file.
+from sklearn.metrics import f1_score
+from sklearn.model_selection import StratifiedGroupKFold
+y_link = np.array([r["edge_label"] == "same_passage" for r in link_oof], dtype=int)
+link_folds = list(StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=20260722).split(
+    np.zeros(len(y_link)), y_link, np.array([r["dst_doc_id"] for r in link_oof])))
+def fold_sd(model_name: str) -> float:
+    p = np.array([r["model_oof_probabilities"][model_name] for r in link_oof])
+    return round(float(np.std([f1_score(y_link[t], (p[t] >= 0.5).astype(int), average="macro")
+                               for _, t in link_folds], ddof=1)), 3)
+report("construction", "between-fold standard deviation of macro-F1, random forest / logistic",
+       (fold_sd("link_random_forest_v1"), fold_sd("link_logistic_v1")), (0.024, 0.070))
+import joblib
+frozen_link = joblib.load(ROOT / "05_models/frozen_models/passage_link_random_forest_v2.joblib")
+report("construction", "trees in the frozen link model", frozen_link.steps[-1][1].n_estimators, 300)
+
+raw_inventory = manifest("newspaper_raw_inventory")
+wf = manifest("hume_workflow_v1")["summary"]
+report("construction", "raw_inventory rows / external ECCO / newspaper / unmapped / Hume-authored (by difference)",
+       (raw_inventory["original_upstream_row_count"], wf["external_ecco_raw_fragment_rows"],
+        raw_inventory["newspaper_raw_fragment_count"], raw_inventory["other_non_numeric_excluded_fragment_count"],
+        raw_inventory["original_upstream_row_count"] - wf["external_ecco_raw_fragment_rows"]
+        - raw_inventory["newspaper_raw_fragment_count"] - raw_inventory["other_non_numeric_excluded_fragment_count"]),
+       (122656, 52141, 6634, 1058, 62823))
+art_model = manifest("newspaper_article_model_input_v1")
+report("construction", "newspaper fragments entering features / article candidates / article features",
+       (raw_inventory["passage_eligibility_fragment_counts"]["eligible_for_passage_construction"],
+        len(jsonl("03_evidence_layers/newspapers/article_candidates.jsonl")), art_model["feature_count"]),
+       (5368, 3212, 15))
+legacy = jsonl("04_annotations/adaptive_training/newspapers/legacy_pair_to_article_alignment.jsonl")
+report("construction", "legacy records / mapping to exactly one eligible candidate",
+       (len(legacy), sum(1 for r in legacy if r["eligible_article_candidate_count"] == 1)), (225, 151))
+news_links = jsonl("04_annotations/sealed_evaluation/newspapers/link_validation_30.jsonl")
+report("construction", "newspaper link audits / returned same_passage with high confidence",
+       (len(news_links), sum(1 for r in news_links
+                             if r["edge_label"] == "same_passage" and r["confidence"] == "high")), (30, 30))
+report("construction", "never individually labelled candidates, and training share %",
+       (27232 - 1813 - 220, round(100 * 1813 / 27232, 1)), (25199, 6.7))
+news_review = manifest("newspaper_review")["input_counts"]
+report("construction", "seeds: book human / book model / newspaper model-only / newspaper model share %",
+       (wf["event_support_human_reprint_passage_count"],
+        wf["event_support_unlabeled_model_priority_passage_count"],
+        news_review["model_only_seed_count"],
+        round(100 * news_review["model_only_seed_count"]
+              / (news_review["model_only_seed_count"] + news_review["human_reprint_seed_count"]))),
+       (572, 1522, 964, 87))
+report("construction", "book components with overlapping human non-republication evidence",
+       wf["event_candidate_with_overlapping_human_non_reprint_count"], 57)
+book_review = manifest("book_review")["input_counts"]
+report("construction", "event candidates / Hume-authored destinations / their candidates / review queue",
+       (book_review["event_candidates_before_destination_exclusion"], book_review["excluded_destination_count"],
+        book_review["excluded_event_count"], book_review["event_candidates_after_destination_exclusion"]),
+       (332, 19, 79, 253))
+
+book_decisions = jsonl("04_annotations/final_event_review/books/review_decisions.jsonl")
+news_decisions = jsonl("04_annotations/final_event_review/newspapers/review_decisions.jsonl")
+split_audit = jsonl("01_events/books/corrections/split_resolution_audit.jsonl")
+split_children = jsonl("03_evidence_layers/books/resolved_split_events.jsonl")
+essay_children = [e for e in events if e.get("essay_split_parent_event_candidate_id")]
+essay_parents = {e["essay_split_parent_event_candidate_id"] for e in essay_children}
+book_effective = len(book_decisions) - len(split_audit) + len(split_children)
+book_positive = len(book_events) - len(essay_children) + len(essay_parents)
+report("construction", "review splits: parents / children; book units judged",
+       (len(split_audit), len(split_children), book_effective), (4, 9, 258))
+report("construction", "book positives before the essay split / newspaper units reviewed",
+       (book_positive, len(news_decisions)), (229, 177))
+report("construction", "units reviewed / positives / non-republications (book 29 + newspaper 91)",
+       (book_effective + len(news_decisions), book_positive + len(news_events),
+        sum(1 for d in book_decisions + news_decisions if d["annotation_label"] == "non_reprint")),
+       (435, 315, 120))
+multi_essay = len(essay_parents) + sum(1 for e in events if len(e["canonical_essay_ids"]) > 1
+                                       and not e.get("essay_split_parent_event_candidate_id"))
+report("construction", "positives with more than one essay / over-wide parents / children",
+       (multi_essay, len(essay_parents), len(essay_children)), (18, 12, 28))
+
 spans = {}
 for media, path in [("books", "03_evidence_layers/books/fragments.jsonl"),
                     ("newspapers", "03_evidence_layers/newspapers/fragments.jsonl")]:
@@ -687,8 +944,8 @@ report("definition", "shortest, 1st-percentile and median match, newspapers",
 # for all 115 destinations; the ESTC pagecount field is missing for two of the
 # sixteen and counts differently where it is present.
 extents = sorted(int(float(d["ecco_pages"])) for d in destinations
-                 if d["structural_type"] == "contiguous run" and d["ecco_pages"])
-report("definition", "contiguous-run extents, count, range and median",
+                 if d["structural_type"] == "continuous block" and d["ecco_pages"])
+report("definition", "continuous-block extents, count, range and median",
        (len(extents), extents[0], extents[-1], round(float(np.median(extents)))), (16, 96, 410, 352))
 singles = sorted(int(float(d["ecco_pages"])) for d in destinations
                  if d["structural_type"] == "single" and d["ecco_pages"])
@@ -721,6 +978,81 @@ report("definition", "legacy support links into the review queue, and events rea
        (sum(r.get("existing_human_reprint_support_count") or 0 for r in queue),
         sum(1 for r in queue if (r.get("existing_human_reprint_support_count") or 0) > 0)),
        (146, 50))
+
+# ---------------------------------------------------- reading across archives (Section 6)
+print("\nReading across archives")
+typed = [d for d in destinations if d["document_type"]]
+report("archives", "document_type populated; pamphlet pages; intermediate page range",
+       (len(typed), sorted(int(float(d["ecco_pages"])) for d in typed if d["document_type"] == "Pamphlet"),
+        min(int(float(d["ecco_pages"])) for d in typed if d["document_type"] == "In-between"),
+        max(int(float(d["ecco_pages"])) for d in typed if d["document_type"] == "In-between")),
+       (97, [16, 24, 24], 75, 124))
+periodicals = [d for d in destinations if d["is_periodical"] == "1"]
+report("archives", "catalogued periodicals / among single-event destinations",
+       (len(periodicals), sum(1 for d in periodicals if d["structural_type"] == "single")), (21, 13))
+educational = [d for d in destinations if d["structural_type"] == "continuous block"
+               and d["recurring_unit"] in ("A", "B", "E")]
+report("archives", "continuous block: educational volumes (Units A, B, E) and their events",
+       (len(educational), sum(int(d["confirmed_events"]) for d in educational)), (13, 28))
+report("archives", "dispersed destinations and events; one-per-essay median pages",
+       (sum(1 for d in destinations if d["structural_type"].startswith("dispersed")),
+        sum(int(d["confirmed_events"]) for d in destinations if d["structural_type"].startswith("dispersed")),
+        round(float(np.median([float(d["ecco_pages"]) for d in destinations
+                               if d["structural_type"] == "dispersed, one per essay"])))),
+       (29, 138, 440))
+articles_with = Counter(e["dst_doc_id"] for e in news_events)
+report("archives", "newspaper articles carrying events / carrying two",
+       (len(articles_with), sum(1 for n in articles_with.values() if n == 2)), (82, 4))
+book_by_essay = Counter(r["canonical_essay_id"] for r in book_rel)
+news_by_essay = Counter(r["canonical_essay_id"] for r in news_rel)
+report("archives", "book / newspaper relations: Impudence, Avarice, Liberty of the Press, Public Credit",
+       [(book_by_essay[k], news_by_essay[k]) for k in ("impudence_modesty", "avarice", "liberty_press", "public_credit")],
+       [(39, 2), (20, 3), (10, 19), (10, 18)])
+# Figure 4 draws every essay with at least four republications.
+figure_four = {"money": (1, 3), "passive_obedience": (1, 3), "stoic": (2, 2), "refinement_arts": (3, 2),
+               "parties_general": (5, 0), "protestant_succession": (5, 1), "remarkable_customs": (1, 5),
+               "balance_power": (2, 4), "balance_trade": (3, 3), "british_government_monarchy_republic": (3, 4),
+               "sceptic": (7, 0), "politics_science": (5, 2), "populousness_ancient_nations": (6, 1),
+               "parties_great_britain": (7, 0), "polygamy_divorces": (4, 3), "dignity_human_nature": (8, 0),
+               "national_characters": (8, 0), "civil_liberty": (9, 1), "study_history": (13, 0),
+               "delicacy_taste_passion": (14, 1), "simplicity_refinement": (14, 1), "love_marriage": (15, 1),
+               "rise_arts_sciences": (16, 2), "avarice": (20, 3), "public_credit": (10, 18),
+               "liberty_press": (10, 19), "impudence_modesty": (39, 2)}
+all_essays = set(book_by_essay) | set(news_by_essay)
+drawn = {k for k in all_essays if book_by_essay[k] + news_by_essay[k] >= 4}
+report("archives", "Figure 4: essays drawn equal those with at least four republications, bars match, omitted / largest omitted",
+       (drawn == set(figure_four),
+        all((book_by_essay[k], news_by_essay[k]) == v for k, v in figure_four.items()),
+        len(all_essays - drawn), max(book_by_essay[k] + news_by_essay[k] for k in all_essays - drawn)),
+       (True, True, 11, 3))
+fisher = math.atanh(rho_len)
+fisher_se = 1 / math.sqrt(len(essays) - 3)
+report("archives", "Fisher 95% interval for the length correlation",
+       (round(math.tanh(fisher - 1.959964 * fisher_se), 2), round(math.tanh(fisher + 1.959964 * fisher_se), 2)),
+       (-0.46, 0.17))
+report("archives", "manifestations containing Liberty of the Press, Public Credit, Impudence",
+       tuple(len(manifestations[k]) for k in ("liberty_press", "public_credit", "impudence_modesty")), (9, 9, 5))
+positive_weight = w[y == 1]
+report("archives", "largest single positive weight as a share of positive weight in the holdout",
+       round(float(positive_weight.max() / positive_weight.sum()), 2), 0.35)
+news_event_of = {e["event_candidate_id"]: e for e in news_events}
+political_1790s = [news_event_of[r["event_candidate_id"]] for r in news_rel
+                   if r["canonical_essay_id"] in POLITICAL
+                   and 1790 <= int(news_event_of[r["event_candidate_id"]]["dst_publication_year"]) <= 1799]
+# The newspaper title is the second component of the article identifier;
+# newspaper_id in newspaper_documents.csv identifies the issue.
+report("archives", "1790s political relations: newspaper titles, issues, first and last year",
+       (len({e["dst_doc_id"].split("_")[1] for e in political_1790s}),
+        len({e["dst_doc_id"].rsplit("-", 2)[0] for e in political_1790s}),
+        min(int(e["dst_publication_year"]) for e in political_1790s),
+        max(int(e["dst_publication_year"]) for e in political_1790s)), (7, 11, 1791, 1797))
+shared_core = list(json.loads((ROOT / "05_models/transfer/domain_shift_feature_shift.json").read_text())["all_labels"])
+article_features = manifest("newspaper_article_model_input_v1")["features"]
+report("archives", "shared-core features / shared with the operational article model",
+       (len(shared_core), len(set(shared_core) & set(article_features))), (15, 13))
+pooled = np.array([r["scores"]["domain_balanced_pooled__domain_balanced_hgb"] for r in scores])
+report("archives", "uncalibrated book-fitted precision; pooled precision",
+       (round(precision_of(raw), 3), round(precision_of(pooled), 3)), (0.762, 0.767))
 
 # ---------------------------------------------------------------- summary
 out = args.output or ROOT / "06_evidence_tests/reproduction_report.json"
