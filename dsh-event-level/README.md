@@ -91,7 +91,8 @@ python scripts/run_evidence_tests.py \
 ## Reproducing the article's numbers
 
 `scripts/reproduce_paper_numbers.py` recomputes every quantity reported in the
-article from the published data release, which carries no OCR text or page
+article from the published data release
+(<https://doi.org/10.5281/zenodo.23471831>), which carries no OCR text or page
 images. It prints each value next to the one printed in the article and writes a
 JSON report.
 

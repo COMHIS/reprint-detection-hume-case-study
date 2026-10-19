@@ -1,0 +1,38 @@
+{
+  "title": "Hume text reuse: event-level evidence construction (code for the DSH article)",
+  "upload_type": "software",
+  "description": "Code for the article \"From matches to events: tracing the republication of Hume's essays in eighteenth-century books and newspapers\" (Ke Shu, Kira Hinderks, Mikko Tolonen; submitted to Digital Scholarship in the Humanities). The dsh-event-level directory reconstructs local passages from text-reuse fragments, consolidates them into republication events, keeps the three kinds of human label apart, runs the evidence checks reported in the article, and recomputes every reported quantity from the published data release (https://doi.org/10.5281/zenodo.23471831). The cikm-pair-level directory holds the earlier pair-level stage. OCR text and page images from ECCO and the Gale newspaper collections are licensed and are not included.",
+  "creators": [
+    {
+      "name": "Shu, Ke",
+      "affiliation": "University of Helsinki",
+      "orcid": "0009-0008-3574-1630"
+    },
+    {
+      "name": "Hinderks, Kira",
+      "affiliation": "University of Helsinki",
+      "orcid": "0009-0004-9233-9315"
+    },
+    {
+      "name": "Tolonen, Mikko",
+      "affiliation": "University of Helsinki",
+      "orcid": "0000-0003-2892-8911"
+    }
+  ],
+  "license": "MIT",
+  "keywords": [
+    "text reuse",
+    "David Hume",
+    "ECCO",
+    "eighteenth-century newspapers",
+    "digital humanities"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.23471831",
+      "relation": "references",
+      "scheme": "doi",
+      "resource_type": "dataset"
+    }
+  ]
+}
